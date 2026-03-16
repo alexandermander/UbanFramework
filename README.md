@@ -80,9 +80,7 @@ All generated files will appear in:
 ## Windows (PowerShell)
 
 ```powershell
-docker run --rm -it `
--v ${PWD}/out_decomplied_files:/app/out_decomplied_files `
-ubanframework
+docker run --rm -it -v ${PWD}/out_decomplied_files:/app/out_decomplied_files ubanframework
 ```
 
 ---
