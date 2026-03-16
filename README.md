@@ -122,40 +122,4 @@ run_decompile.sh
 ```bash
 MAX=5
 ```
-
-You can increase this value depending on your analysis needs.
-
----
-
-# Project Structure
-
-```
-.
-├── Dockerfile
-├── run_decompile.sh
-├── run_decompile_parallel.py
-├── get_PE_files.sh
-├── ExportDecompiled.java
-├── test_VM_firmware.fd
-├── out_decomplied_files/
-└── README.md
-```
-
----
-
-# Notes
-
-* The framework is intended for **UEFI firmware analysis and reverse engineering**.
-* The Docker container ensures that all dependencies are correctly installed.
-* The scripts can easily be extended to process larger firmware datasets.
-
----
-
-# Future Improvements
-
-Possible improvements include:
-
-* parallel decompilation of firmware modules
-* automatic GUID identification
-* integration with vulnerability detection pipelines
-* automated firmware dataset processing
+You can increase this value depending on your analysis needs, for now it set to 5.
