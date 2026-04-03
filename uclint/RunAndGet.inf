@@ -1,0 +1,33 @@
+[Defines]
+  INF_VERSION                    = 0x00010005
+  BASE_NAME                      = RunAndGet
+  FILE_GUID                      = 593E11D2-6999-4DB9-98F8-C5B44986E2A8
+  MODULE_TYPE                    = UEFI_APPLICATION
+  VERSION_STRING                 = 1.1
+  ENTRY_POINT                    = UefiMain
+
+[Sources]
+  RunAndGet.c
+  Shell.c
+  TcpClient.c
+
+[Packages]
+  MdePkg/MdePkg.dec
+  MdeModulePkg/MdeModulePkg.dec
+  NetworkPkg/NetworkPkg.dec
+
+[LibraryClasses]
+  BaseLib
+  BaseMemoryLib
+  MemoryAllocationLib
+  PrintLib
+  UefiApplicationEntryPoint
+  UefiBootServicesTableLib
+  UefiLib
+  UefiRuntimeServicesTableLib
+
+[Protocols]
+  gEfiLoadedImageProtocolGuid
+  gEfiPxeBaseCodeProtocolGuid
+  gEfiTcp4ProtocolGuid
+  gEfiTcp4ServiceBindingProtocolGuid
