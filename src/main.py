@@ -53,7 +53,10 @@ def process_module(module_dir: str, model_name: str, verbose: bool = False):
     for idx, func in enumerate(starting_points, 1):
         if func.get("token_count", 0) < 10:
             func["score_1_to_100"] = 0
-            func["reason_summary"] = "Skipped: Token count too low."
+            func["analysis_detail"] = "Skipped: Token count too low."
+            func["cwe_id"] = ""
+            func["vulnerability_type"] = ""
+            func["is_persistent"] = False
             append_to_jsonl(func, jsonl_output_path)
             continue
             
@@ -73,7 +76,7 @@ def main():
     parser.add_argument("--limit", "-l", type=int, default=None, help="Maximum number of module directories to analyze.")
     args = parser.parse_args()
     
-    if not os.environ.get("ANTHROPIC_API_KEY"):
+    if args.model.lower() != "ollama" and not os.environ.get("ANTHROPIC_API_KEY"):
         print("Error: ANTHROPIC_API_KEY environment variable not found. Please add it to your .env file.")
         return
 

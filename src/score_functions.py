@@ -1,5 +1,6 @@
 import json
 import os
+import requests
 import anthropic
 from datetime import datetime, timezone
 
@@ -12,22 +13,34 @@ def score_function(func_data: dict, all_functions_dict: dict, model_name: str = 
     func_name = func_data.get("function_name", "Unknown")
     MAX_JUMPS = 5
 
-    system_prompt = """You are an expert security researcher specializing in EDK2 UEFI firmware binaries and analyzing decompiled pseudo-C code.
-Task: Evaluate the EDK2 firmware function for potential security vulnerabilities.
+    system_prompt = """
+    You are a Static Analysis Security Testing (SAST) engine specialized in EDK2 UEFI C source code. 
+Your goal is to identify CWEs (Common Weakness Enumerations) specifically prevalent in firmware.
 
-RULES:
-- You must reply ONLY with a valid JSON object matching the schema below. Do not output markdown code blocks (like ```json). Just the raw JSON.
-- If you need to see the source code of another function called within this code before you can make a safe judgment, put its name in `request_context`.
-- If you have enough information to score the function, leave `request_context` empty and provide a `score_1_to_100`.
+ANALYSIS CHECKLIST:
+1. ARITHMETIC: Check for 'Integer Overflow/Truncation' in Buffer Size calculations (CWE-190).
+2. MEMORY: Identify 'Out-of-Bounds' reads/writes in manual pointer arithmetic (CWE-119).
+3. PROTOCOLS: Check for 'Unchecked Return Values' from Boot Services like gBS->LocateProtocol (CWE-252).
+4. SMM: Flag any 'SMM Callouts' where SMM code executes/references code in non-SMM RAM (CWE-285).
+5. TOCTOU: Identify 'Time-of-Check to Time-of-Use' vulnerabilities in NVRAM Variable handling.
+ect.
+
+STRICT OUTPUT RULE:
+- You must reply ONLY with a valid JSON object.
+- If a function call's side effects are unknown and critical to the safety of the current function, you MUST list it in `request_context` and set `score_1_to_100` to 0.
+- Only provide a score > 0 if you can verify the vulnerability or the safety within the provided snippet.
 
 SCHEMA:
 {
-  "request_context": ["function_name1", "function_name2"], 
+  "request_context": ["string"],
   "score_1_to_100": int,
-  "confidence": float (0.0 to 1.0),
-  "reason_summary": string,
-  "suspicion_tags": [string]
-}"""
+  "confidence": float,
+  "cwe_id": "string",
+  "vulnerability_type": "string",
+  "analysis_detail": "string",
+  "is_persistent": bool
+}
+    """
 
     initial_user_prompt = f"Function Name: {func_name}\nCode:\n{source}"
 
@@ -38,7 +51,10 @@ SCHEMA:
     # Initialize default failure outputs
     func_data["score_1_to_100"] = 0
     func_data["confidence"] = 0.0
-    func_data["reason_summary"] = "Error or Max Depth Exceeded"
+    func_data["cwe_id"] = ""
+    func_data["vulnerability_type"] = ""
+    func_data["analysis_detail"] = "Error or Max Depth Exceeded"
+    func_data["is_persistent"] = False
     func_data["suspicion_tags"] = []
     func_data["analysis_timestamp"] = datetime.now(timezone.utc).isoformat()
     func_data["stage"] = "stage1_scoring_interactive_anthropic"
@@ -47,23 +63,42 @@ SCHEMA:
     requested_history = set()
     
     # Initialize Anthropic client (automatically picks up os.environ["ANTHROPIC_API_KEY"])
-    client = anthropic.Anthropic()
+    client = None
+    if model_name.lower() != "ollama":
+        client = anthropic.Anthropic()
     
     while jumps <= MAX_JUMPS:
         if verbose:
             print(f"\n[VERBOSE] === Sending to Claude ({len(messages)} messages total, Jump {jumps}/{MAX_JUMPS}) ===")
             print(json.dumps(messages[-1], indent=2))
             print("=" * 60)
+        elif jumps > 0:
+            print(f"    -> Requesting context ({len(messages)} messages total, Jump {jumps}/{MAX_JUMPS})")
 
         try:
-            response = client.messages.create(
-                model=model_name,
-                max_tokens=1024,
-                system=system_prompt,
-                messages=messages
-            )
+            if model_name.lower() == "ollama":
+                url = "http://192.168.1.131:11434/api/chat"
+                ollama_messages = [{"role": "system", "content": system_prompt}] + messages
+                payload = {
+                    "model": "uban-evaluator:latest",
+                    "messages": ollama_messages,
+                    "stream": False,
+                    "options": {
+                        "num_predict": 1024
+                    }
+                }
+                resp = requests.post(url, json=payload)
+                resp.raise_for_status()
+                message_response = resp.json()["message"]["content"].strip()
+            else:
+                response = client.messages.create(
+                    model=model_name,
+                    max_tokens=1024,
+                    system=system_prompt,
+                    messages=messages
+                )
 
-            message_response = response.content[0].text.strip()
+                message_response = response.content[0].text.strip()
             messages.append({"role": "assistant", "content": message_response})
             
             # Clean possible markdown from the response just in case
@@ -84,7 +119,10 @@ SCHEMA:
             if not new_requests:
                 func_data["score_1_to_100"] = structured_data.get("score_1_to_100", 0)
                 func_data["confidence"] = structured_data.get("confidence", 0.0)
-                func_data["reason_summary"] = structured_data.get("reason_summary", "No reason provided")
+                func_data["cwe_id"] = structured_data.get("cwe_id", "")
+                func_data["vulnerability_type"] = structured_data.get("vulnerability_type", "")
+                func_data["analysis_detail"] = structured_data.get("analysis_detail", "No analysis provided")
+                func_data["is_persistent"] = structured_data.get("is_persistent", False)
                 func_data["suspicion_tags"] = structured_data.get("suspicion_tags", [])
 
                 if jumps > 0:
@@ -93,7 +131,7 @@ SCHEMA:
 
             jumps += 1
             if jumps > MAX_JUMPS:
-                func_data["reason_summary"] = f"Max jumps ({MAX_JUMPS}) exceeded while requesting: {new_requests}"
+                func_data["analysis_detail"] = f"Max jumps ({MAX_JUMPS}) exceeded while requesting: {new_requests}"
                 return func_data
 
             context_reply = "Here is the context you requested:\n\n"
@@ -121,7 +159,7 @@ SCHEMA:
             import sys
             sys.exit(1)
         except Exception as e:
-            func_data["reason_summary"] = f"Exception during scoring loop: {str(e)}"
+            func_data["analysis_detail"] = f"Exception during scoring loop: {str(e)}"
             return func_data
 
     return func_data
