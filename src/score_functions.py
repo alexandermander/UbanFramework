@@ -16,6 +16,13 @@ def score_function(func_data: dict, all_functions_dict: dict, model_name: str = 
     system_prompt = """You are an expert security researcher specializing in EDK2 UEFI firmware binaries and analyzing decompiled pseudo-C code.
 Task: Evaluate the EDK2 firmware function for potential security vulnerabilities.
 
+ANALYSIS CHECKLIST:
+1. ARITHMETIC: Check for 'Integer Overflow/Truncation' in Buffer Size calculations (CWE-190).
+2. MEMORY: Identify 'Out-of-Bounds' reads/writes in manual pointer arithmetic (CWE-119).
+3. PROTOCOLS: Check for 'Unchecked Return Values' from Boot Services like gBS->LocateProtocol (CWE-252).
+4. SMM: Flag any 'SMM Callouts' where SMM code executes/references code in non-SMM RAM (CWE-285).
+5. TOCTOU: Identify 'Time-of-Check to Time-of-Use' vulnerabilities in NVRAM Variable handling.
+
 RULES:
 - You must reply ONLY with a valid JSON object matching the schema below. Do not output markdown code blocks (like ```json). Just the raw JSON.
 - If you need to see the source code of another function called within this code before you can make a safe judgment, put its name in `request_context`.
