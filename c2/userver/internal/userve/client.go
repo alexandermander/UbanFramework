@@ -7,8 +7,11 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/chzyer/readline"
 
@@ -16,6 +19,12 @@ import (
 )
 
 const shellPrompt = "userve> "
+
+const (
+	runPollInterval = 200 * time.Millisecond
+	runIdleTimeout  = 2 * time.Second
+	runStartTimeout = 3 * time.Second
+)
 
 func sendControlRequest(controlSocket string, req control.ControlRequest) (control.ControlResponse, error) {
 	conn, err := net.Dial("unix", controlSocket)
@@ -42,6 +51,10 @@ func printControlResponse(resp control.ControlResponse) {
 }
 
 func RunControlCommand(controlSocket, command string, args []string) error {
+	if command == "run" {
+		return runAndFollow(controlSocket)
+	}
+
 	req, err := requestFromCommand(command, args)
 	if err != nil {
 		return err
@@ -103,6 +116,11 @@ func RunShell(controlSocket string) error {
 			continue
 		case line == "exit" || line == "quit" || line == "q":
 			return nil
+		case line == "run":
+			if err := runAndFollow(controlSocket); err != nil {
+				fmt.Println(err)
+			}
+			continue
 		}
 
 		req := requestFromLine(line)
@@ -155,6 +173,91 @@ func requestFromLine(line string) control.ControlRequest {
 		return control.ControlRequest{Command: "echo", Args: []string{strings.TrimSpace(strings.TrimPrefix(line, "echo "))}}
 	default:
 		return control.ControlRequest{Command: "raw", Args: []string{line}}
+	}
+}
+
+func fetchAllOutputs(controlSocket string) ([]string, error) {
+	resp, err := sendControlRequest(controlSocket, control.ControlRequest{
+		Command: "outputs",
+		Args:    []string{"0"},
+	})
+	if err != nil {
+		return nil, err
+	}
+	if !resp.OK {
+		return nil, fmt.Errorf("%s", strings.Join(resp.Lines, "\n"))
+	}
+	if len(resp.Lines) == 1 && resp.Lines[0] == "No buffered output." {
+		return []string{}, nil
+	}
+	return resp.Lines, nil
+}
+
+func runAndFollow(controlSocket string) error {
+	baseline, err := fetchAllOutputs(controlSocket)
+	if err != nil {
+		baseline = nil
+	}
+
+	resp, err := sendControlRequest(controlSocket, control.ControlRequest{Command: "run"})
+	if err != nil {
+		return err
+	}
+
+	printControlResponse(resp)
+	if !resp.OK {
+		return fmt.Errorf("control command failed")
+	}
+
+	fmt.Println("Streaming remote output. Press Ctrl+C to stop.")
+	return followOutputs(controlSocket, len(baseline))
+}
+
+func followOutputs(controlSocket string, seen int) error {
+	ticker := time.NewTicker(runPollInterval)
+	defer ticker.Stop()
+
+	signalChan := make(chan os.Signal, 1)
+	signal.Notify(signalChan, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(signalChan)
+
+	startedAt := time.Now()
+	lastOutputAt := time.Time{}
+
+	for {
+		select {
+		case <-signalChan:
+			fmt.Println()
+			return nil
+		case <-ticker.C:
+			lines, err := fetchAllOutputs(controlSocket)
+			if err != nil {
+				return err
+			}
+
+			if len(lines) < seen {
+				seen = 0
+			}
+			if len(lines) > seen {
+				for _, line := range lines[seen:] {
+					fmt.Println(line)
+				}
+				seen = len(lines)
+				lastOutputAt = time.Now()
+				continue
+			}
+
+			now := time.Now()
+			if lastOutputAt.IsZero() {
+				if now.Sub(startedAt) >= runStartTimeout {
+					return nil
+				}
+				continue
+			}
+			if now.Sub(lastOutputAt) >= runIdleTimeout {
+				return nil
+			}
+		}
 	}
 }
 

@@ -35,7 +35,7 @@ func DefaultControlSocketPath() string {
 func RunService(port int, controlSocket string) error {
 	h := hub.New()
 	console := stream.NewConsoleSink(os.Stdout)
-	tail := stream.NewTailSink(20)
+	tail := stream.NewTailSink(256)
 
 	unsubscribeConsole := h.Subscribe(console.Handle)
 	defer unsubscribeConsole()
