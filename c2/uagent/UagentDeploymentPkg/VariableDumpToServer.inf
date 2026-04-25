@@ -1,0 +1,23 @@
+[Defines]
+  INF_VERSION                    = 0x0001001B
+  BASE_NAME                      = VariableDumpToServer
+  FILE_GUID                      = 7FA6323D-6D47-41A5-AC7B-716C629C060D
+  MODULE_TYPE                    = UEFI_APPLICATION
+  VERSION_STRING                 = 1.0
+  ENTRY_POINT                    = UefiMain
+
+[Sources]
+  VariableDumpToServer.c
+
+[Packages]
+  MdePkg/MdePkg.dec
+
+[LibraryClasses]
+  BaseLib
+  BaseMemoryLib
+  MemoryAllocationLib
+  PrintLib
+  UefiApplicationEntryPoint
+  UefiBootServicesTableLib
+  UefiLib
+  UefiRuntimeServicesTableLib

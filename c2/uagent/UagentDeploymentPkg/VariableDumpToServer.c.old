@@ -1,0 +1,190 @@
+#include <Uefi.h>
+
+#include <Library/BaseLib.h>
+#include <Library/BaseMemoryLib.h>
+#include <Library/MemoryAllocationLib.h>
+#include <Library/PrintLib.h>
+#include <Library/UefiApplicationEntryPoint.h>
+#include <Library/UefiBootServicesTableLib.h>
+#include <Library/UefiLib.h>
+#include <Library/UefiRuntimeServicesTableLib.h>
+
+#include "../RunAndGetPkg/RunAndGet.h"
+
+STATIC EFI_GUID  mRunAndGetDebugProtocolGuid = RUN_AND_GET_DEBUG_PROTOCOL_GUID;
+
+#define VARIABLE_DUMP_START_MARKER     L"[VariableDumpToServer] start"
+#define VARIABLE_DUMP_SUCCESS_MARKER   L"[VariableDumpToServer] Success"
+#define VARIABLE_DUMP_FAILURE_MARKER   L"[VariableDumpToServer] Failure"
+#define INITIAL_VARIABLE_NAME_SIZE     256
+#define GUID_TEXT_SIZE                 48
+
+STATIC
+EFI_STATUS
+SendRemoteMessage (
+  IN RUN_AND_GET_DEBUG_PROTOCOL  *Debug,
+  IN CONST CHAR16                *Message
+  )
+{
+  return Debug->SendDebugMessage (Debug, Message);
+}
+
+EFI_STATUS
+EFIAPI
+UefiMain (
+  IN EFI_HANDLE        ImageHandle,
+  IN EFI_SYSTEM_TABLE  *SystemTable
+  )
+{
+  EFI_STATUS                  Status;
+  EFI_STATUS                  SendStatus;
+  RUN_AND_GET_DEBUG_PROTOCOL  *Debug;
+  EFI_GUID                    VendorGuid;
+  CHAR16                      *VariableName;
+  CHAR16                      *RemoteMessage;
+  UINTN                       RemoteMessageCapacity;
+  UINTN                       RemoteMessageSize;
+  UINTN                       VariableNameSize;
+  UINTN                       VariableCount;
+
+  Debug            = NULL;
+  VariableName     = NULL;
+  RemoteMessage    = NULL;
+  RemoteMessageCapacity = 0;
+  RemoteMessageSize = 0;
+  VariableNameSize = INITIAL_VARIABLE_NAME_SIZE;
+  VariableCount    = 0;
+
+  Status = gBS->LocateProtocol (
+                  &mRunAndGetDebugProtocolGuid,
+                  NULL,
+                  (VOID **)&Debug
+                  );
+  if (EFI_ERROR (Status)) {
+    Print (L"LocateProtocol failed: %r\n", Status);
+    return Status;
+  }
+
+  Status = SendRemoteMessage (Debug, VARIABLE_DUMP_START_MARKER);
+  if (EFI_ERROR (Status)) {
+    Print (L"Failed to send start marker: %r\n", Status);
+    return Status;
+  }
+
+  Print (L"Remote variable dump started.\n");
+
+  VariableName = AllocateZeroPool (VariableNameSize);
+  if (VariableName == NULL) {
+    Print (L"AllocateZeroPool for variable name failed.\n");
+    SendStatus = SendRemoteMessage (Debug, VARIABLE_DUMP_FAILURE_MARKER);
+    if (EFI_ERROR (SendStatus)) {
+      Print (L"Failed to send failure marker: %r\n", SendStatus);
+    }
+
+    return EFI_OUT_OF_RESOURCES;
+  }
+
+  SetMem (&VendorGuid, sizeof (VendorGuid), 0);
+  VariableName[0] = L'\0';
+
+  while (TRUE) {
+    UINTN  RequiredSize;
+
+    RequiredSize = VariableNameSize;
+    Status = gRT->GetNextVariableName (
+                    &RequiredSize,
+                    VariableName,
+                    &VendorGuid
+                    );
+    if (Status == EFI_NOT_FOUND) {
+      break;
+    }
+
+    if (Status == EFI_BUFFER_TOO_SMALL) {
+      CHAR16  *ResizedName;
+
+      ResizedName = ReallocatePool (VariableNameSize, RequiredSize, VariableName);
+      if (ResizedName == NULL) {
+        Print (L"Failed to resize variable name buffer.\n");
+        Status = EFI_OUT_OF_RESOURCES;
+        goto SendFailureMarker;
+      }
+
+      VariableName     = ResizedName;
+      VariableNameSize = RequiredSize;
+      Status           = gRT->GetNextVariableName (
+                                 &VariableNameSize,
+                                 VariableName,
+                                 &VendorGuid
+                                 );
+      if (EFI_ERROR (Status)) {
+        Print (L"GetNextVariableName retry failed: %r\n", Status);
+        goto SendFailureMarker;
+      }
+    } else if (EFI_ERROR (Status)) {
+      Print (L"GetNextVariableName failed: %r\n", Status);
+      goto SendFailureMarker;
+    }
+
+    RemoteMessageSize = StrSize (VariableName) + (GUID_TEXT_SIZE * sizeof (CHAR16));
+    if ((RemoteMessage == NULL) || (RemoteMessageSize > RemoteMessageCapacity)) {
+      CHAR16  *ResizedMessage;
+
+      ResizedMessage = ReallocatePool (RemoteMessageCapacity, RemoteMessageSize, RemoteMessage);
+      if (ResizedMessage == NULL) {
+        Print (L"Failed to resize remote message buffer.\n");
+        Status = EFI_OUT_OF_RESOURCES;
+        goto SendFailureMarker;
+      }
+
+      RemoteMessage         = ResizedMessage;
+      RemoteMessageCapacity = RemoteMessageSize;
+    }
+
+    UnicodeSPrint (
+      RemoteMessage,
+      RemoteMessageSize,
+      L"%s | %g",
+      VariableName,
+      &VendorGuid
+      );
+
+    Status = SendRemoteMessage (Debug, RemoteMessage);
+    if (EFI_ERROR (Status)) {
+      Print (L"SendDebugMessage failed for %s: %r\n", VariableName, Status);
+      goto SendFailureMarker;
+    }
+
+    VariableCount++;
+    if ((VariableCount % 25) == 0) {
+      Print (L"Sent %u variables.\n", (UINT32)VariableCount);
+    }
+  }
+
+  Status = SendRemoteMessage (Debug, VARIABLE_DUMP_SUCCESS_MARKER);
+  if (EFI_ERROR (Status)) {
+    Print (L"Failed to send success marker: %r\n", Status);
+    goto Cleanup;
+  }
+
+  Print (L"Remote variable dump completed: %u variables.\n", (UINT32)VariableCount);
+  Status = EFI_SUCCESS;
+  goto Cleanup;
+
+SendFailureMarker:
+  SendStatus = SendRemoteMessage (Debug, VARIABLE_DUMP_FAILURE_MARKER);
+  if (EFI_ERROR (SendStatus)) {
+    Print (L"Failed to send failure marker: %r\n", SendStatus);
+  }
+
+Cleanup:
+  if (RemoteMessage != NULL) {
+    FreePool (RemoteMessage);
+  }
+
+  if (VariableName != NULL) {
+    FreePool (VariableName);
+  }
+
+  return Status;
+}
