@@ -1,17 +1,15 @@
 [Defines]
-  PLATFORM_NAME                  = RunAndGetPkg
-  PLATFORM_GUID                  = 79D4D318-911E-4C87-87B8-6EB598449F78
-  PLATFORM_VERSION               = 1.1
+  PLATFORM_NAME                  = UagentDebugTestPkg
+  PLATFORM_GUID                  = 5EA3369D-57D1-4ACF-B7E1-8C87372C1B30
+  PLATFORM_VERSION               = 1.0
   DSC_SPECIFICATION              = 0x00010005
-  OUTPUT_DIRECTORY               = Build/RunAndGetPkg
+  OUTPUT_DIRECTORY               = Build/UagentDebugTestPkg
   SUPPORTED_ARCHITECTURES        = X64
   BUILD_TARGETS                  = DEBUG
   SKUID_IDENTIFIER               = DEFAULT
 
 [Packages]
   MdePkg/MdePkg.dec
-  MdeModulePkg/MdeModulePkg.dec
-  NetworkPkg/NetworkPkg.dec
 
 [LibraryClasses]
   BaseLib|MdePkg/Library/BaseLib/BaseLib.inf
@@ -25,8 +23,8 @@
   StackCheckLib|MdePkg/Library/StackCheckLibNull/StackCheckLibNull.inf
   UefiApplicationEntryPoint|MdePkg/Library/UefiApplicationEntryPoint/UefiApplicationEntryPoint.inf
   UefiBootServicesTableLib|MdePkg/Library/UefiBootServicesTableLib/UefiBootServicesTableLib.inf
-  UefiRuntimeServicesTableLib|MdePkg/Library/UefiRuntimeServicesTableLib/UefiRuntimeServicesTableLib.inf
   UefiLib|MdePkg/Library/UefiLib/UefiLib.inf
+  UefiRuntimeServicesTableLib|MdePkg/Library/UefiRuntimeServicesTableLib/UefiRuntimeServicesTableLib.inf
 
 [Components]
-  RunAndGetPkg/RunAndGet.inf
+  UagentPrintTcpExPkg/UagentDebugTest.inf

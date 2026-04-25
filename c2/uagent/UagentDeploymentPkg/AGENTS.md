@@ -2,15 +2,15 @@
 
 ## Purpose
 
-`TestDevPkg` is a small EDK2 package for building standalone UEFI test applications that send remote-visible debug text through the `RunAndGet` custom debug protocol.
+`TestDevPkg` is a small EDK2 package for building standalone UEFI test applications that send remote-visible debug text through the `Uagent` custom debug protocol.
 
-This package exists so an agent can quickly create or modify EFI test apps without needing to understand the full `RunAndGetPkg` implementation.
+This package exists so an agent can quickly create or modify EFI test apps without needing to understand the full `UagentPkg` implementation.
 
 ## What The Agent Should Do Here
 
 Use this package when the task is one of these:
 
-- create a new EFI test app that sends a debug message to the active `RunAndGet` server session
+- create a new EFI test app that sends a debug message to the active `Uagent` server session
 - change the message text sent by a test app
 - add another debug send
 - add simple local `Print()` confirmation text for the operator
@@ -19,23 +19,23 @@ Use this package when the task is one of these:
 
 ## What The Agent Must Not Do
 
-- do not change the `RunAndGet` packet format here
+- do not change the `Uagent` packet format here
 - do not invent a new network transport
 - do not assume `Print()` or `DEBUG()` is visible to the Go server
-- do not replace the `RUN_AND_GET_DEBUG_PROTOCOL` path with raw TCP code in this package
+- do not replace the `UAGENT_DEBUG_PROTOCOL` path with raw TCP code in this package
 - do not change GUIDs unless the owning protocol definition changes intentionally
 - do not create a custom uploader or runner when `userver` already provides `push` and `run`
 
 ## Dependency Contract
 
-This package depends on `RunAndGetPkg` providing the custom protocol defined in:
+This package depends on `UagentPkg` providing the custom protocol defined in:
 
-- `../RunAndGetPkg/RunAndGet.h`
+- `../UagentPkg/Uagent.h`
 
 The key contract is:
 
-- protocol GUID: `RUN_AND_GET_DEBUG_PROTOCOL_GUID`
-- protocol type: `RUN_AND_GET_DEBUG_PROTOCOL`
+- protocol GUID: `UAGENT_DEBUG_PROTOCOL_GUID`
+- protocol type: `UAGENT_DEBUG_PROTOCOL`
 - remote send method: `SendDebugMessage()`
 
 This package does not own the transport. It only consumes the protocol.
@@ -51,16 +51,16 @@ These only print locally:
 
 If text must be visible on the Go server, the EFI app must:
 
-1. locate `RUN_AND_GET_DEBUG_PROTOCOL`
+1. locate `UAGENT_DEBUG_PROTOCOL`
 2. call `SendDebugMessage()`
 
-That call is the approved path because `RunAndGetPkg` converts it into a `TcpOutputText` packet for the server.
+That call is the approved path because `UagentPkg` converts it into a `TcpOutputText` packet for the server.
 
 Agents must not treat local `Print()` success as proof that the message reached the server. Remote success means `SendDebugMessage()` was called and the resulting text is visible through `userver run` or `userver outputs`.
 
 Current transport behavior:
 
-- `RunAndGetPkg` now sends `TcpConnectSession` and `TcpOutputText` payloads as raw `CHAR16` bytes instead of squeezing them through the old fixed ASCII buffer
+- `UagentPkg` now sends `TcpConnectSession` and `TcpOutputText` payloads as raw `CHAR16` bytes instead of squeezing them through the old fixed ASCII buffer
 - `userver` decodes those payloads for display
 - if a payload is not readable text, `userver` shows it as `hex:...`
 
@@ -74,8 +74,8 @@ When asked to make an EFI app in this package that sends a message to the server
    - `<Library/UefiApplicationEntryPoint.h>`
    - `<Library/UefiBootServicesTableLib.h>`
    - `<Library/UefiLib.h>`
-   - `../RunAndGetPkg/RunAndGet.h`
-3. Define a local GUID variable from `RUN_AND_GET_DEBUG_PROTOCOL_GUID`.
+   - `../UagentPkg/Uagent.h`
+3. Define a local GUID variable from `UAGENT_DEBUG_PROTOCOL_GUID`.
 4. Call `gBS->LocateProtocol()`.
 5. If protocol lookup fails:
    - print the status locally with `Print()`
@@ -119,9 +119,9 @@ Use this pattern unless the task requires something more specific:
 #include <Library/UefiBootServicesTableLib.h>
 #include <Library/UefiLib.h>
 
-#include "../RunAndGetPkg/RunAndGet.h"
+#include "../UagentPkg/Uagent.h"
 
-STATIC EFI_GUID  mRunAndGetDebugProtocolGuid = RUN_AND_GET_DEBUG_PROTOCOL_GUID;
+STATIC EFI_GUID  mUagentDebugProtocolGuid = UAGENT_DEBUG_PROTOCOL_GUID;
 
 EFI_STATUS
 EFIAPI
@@ -131,10 +131,10 @@ UefiMain (
   )
 {
   EFI_STATUS                  Status;
-  RUN_AND_GET_DEBUG_PROTOCOL  *Debug;
+  UAGENT_DEBUG_PROTOCOL  *Debug;
 
   Status = gBS->LocateProtocol (
-                  &mRunAndGetDebugProtocolGuid,
+                  &mUagentDebugProtocolGuid,
                   NULL,
                   (VOID **)&Debug
                   );
@@ -245,7 +245,7 @@ Expected behavior:
 
 ## `userver` Workflow
 
-When an agent needs to deploy and run a newly built EFI against the active remote `RunAndGet` session, use the existing Go control service instead of inventing another transport.
+When an agent needs to deploy and run a newly built EFI against the active remote `Uagent` session, use the existing Go control service instead of inventing another transport.
 
 The `userver` project lives at:
 
@@ -308,7 +308,7 @@ Important behavioral rules:
 
 - `push` sends the file basename to the remote side, so the `.efi` filename matters.
 - `run` executes the currently uploaded EFI on the active remote connection.
-- `run` stays attached to incoming remote output and returns to the normal terminal automatically when an output line contains `Success`.
+- `run` sends the execute request and returns transport success or failure.
 - `outputs` shows buffered `TcpOutputText` messages already received by the Go service.
 - `stop` shuts down the background `userver` service.
 - if the task is to send text to the server, the agent should expect to see a distinctive remote marker line during `run`
@@ -319,8 +319,8 @@ Important behavioral rules:
 The expected remote text path is:
 
 1. the EFI app calls `SendDebugMessage()`
-2. `RunAndGetPkg` converts that into `TcpOutputText`
-3. for `TcpConnectSession` and `TcpOutputText`, `RunAndGetPkg` sends the text payload as raw `CHAR16` bytes
+2. `UagentPkg` converts that into `TcpOutputText`
+3. for `TcpConnectSession` and `TcpOutputText`, `UagentPkg` sends the text payload as raw `CHAR16` bytes
 4. `userver` decodes the payload and exposes it through live `run` output and `outputs`
 
 This means:
@@ -329,7 +329,7 @@ This means:
 - `SendDebugMessage()` is for the remote Go server
 - `SendDebugMessage()` is no longer limited by the old fixed ASCII payload path used for local control text commands
 
-If the user asks the agent to "deploy the EFI", "send it to the server", "run it remotely", or "test it through RunAndGet", the agent should assume the correct path is:
+If the user asks the agent to "deploy the EFI", "send it to the server", "run it remotely", or "test it through Uagent", the agent should assume the correct path is:
 
 1. build the `.efi`
 2. use `userver push`
@@ -346,13 +346,13 @@ If the task is specifically about proving that output reached the server, the EF
 
 `LocateProtocol failed`
 
-- `RunAndGet.efi` is not running
+- `Uagent.efi` is not running
 - the protocol was not installed
 - the session ended before the test app was launched
 
 `SendDebugMessage returned: Not Ready`
 
-- the debug protocol exists, but `RunAndGetPkg` does not currently have an active TCP client
+- the debug protocol exists, but `UagentPkg` does not currently have an active TCP client
 
 Message appears locally but not on server
 
@@ -369,7 +369,7 @@ Build succeeds but `.efi` is missing
 `./bin/userver list` shows no connections
 
 - the background `userver` service may not be running
-- the remote `RunAndGet` client may not be connected
+- the remote `Uagent` client may not be connected
 - the wrong control socket or machine may be in use
 
 `./bin/userver push ...` fails
@@ -381,7 +381,7 @@ Build succeeds but `.efi` is missing
 `./bin/userver run` produces no useful remote output
 
 - the uploaded EFI may only be using `Print()`
-- the app may not be locating `RUN_AND_GET_DEBUG_PROTOCOL`
+- the app may not be locating `UAGENT_DEBUG_PROTOCOL`
 - the remote session may no longer be active
 - the app may be sending remote text, but not with a recognizable start or completion marker
 - the payload may not be readable text, in which case `userver` will show it as `hex:...`
@@ -409,7 +409,7 @@ When the user asks for both:
 When the user asks to "make an EDK app that prints to the server":
 
 - create a UEFI application in this package
-- consume `RUN_AND_GET_DEBUG_PROTOCOL`
+- consume `UAGENT_DEBUG_PROTOCOL`
 - send the text through `SendDebugMessage()`
 - include a distinctive remote start or completion marker
 - make sure `.inf` and `.dsc` are correct
@@ -427,8 +427,9 @@ When the user asks to deploy or run the built EFI remotely:
 A change in this package is successful when:
 
 - the module builds as a UEFI application
-- it can locate `RUN_AND_GET_DEBUG_PROTOCOL`
+- it can locate `UAGENT_DEBUG_PROTOCOL`
 - it calls `SendDebugMessage()` successfully
 - the message becomes visible on the Go server
 - the agent can deploy and run the resulting `.efi` through `userver` when the task requires remote execution
 - the remote output is distinctive enough for an operator to verify that the correct EFI actually ran
+

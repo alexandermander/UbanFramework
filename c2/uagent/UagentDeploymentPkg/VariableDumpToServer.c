@@ -8,9 +8,9 @@
 #include <Library/UefiLib.h>
 #include <Library/UefiRuntimeServicesTableLib.h>
 
-#include "../RunAndGetPkg/RunAndGet.h"
+#include "../UagentPkg/Uagent.h"
 
-STATIC EFI_GUID  mRunAndGetDebugProtocolGuid = RUN_AND_GET_DEBUG_PROTOCOL_GUID;
+STATIC EFI_GUID  mUagentDebugProtocolGuid = UAGENT_DEBUG_PROTOCOL_GUID;
 
 #define VARIABLE_DUMP_START_MARKER    L"[VariableDumpToServer] start"
 #define VARIABLE_DUMP_SUCCESS_MARKER  L"[VariableDumpToServer] Success"
@@ -19,8 +19,8 @@ STATIC EFI_GUID  mRunAndGetDebugProtocolGuid = RUN_AND_GET_DEBUG_PROTOCOL_GUID;
 STATIC
 EFI_STATUS
 SendRemoteMessage (
-  IN RUN_AND_GET_DEBUG_PROTOCOL  *Debug,
-  IN CONST CHAR16                *Message
+  IN UAGENT_DEBUG_PROTOCOL  *Debug,
+  IN CONST CHAR16           *Message
   )
 {
   EFI_STATUS  Status;
@@ -40,8 +40,8 @@ SendRemoteMessage (
 STATIC
 EFI_STATUS
 SendRemoteFailure (
-  IN RUN_AND_GET_DEBUG_PROTOCOL  *Debug,
-  IN EFI_STATUS                  FailureStatus
+  IN UAGENT_DEBUG_PROTOCOL  *Debug,
+  IN EFI_STATUS             FailureStatus
   )
 {
   CHAR16  Message[96];
@@ -69,7 +69,7 @@ UefiMain (
 {
   EFI_STATUS                  Status;
   EFI_STATUS                  SendStatus;
-  RUN_AND_GET_DEBUG_PROTOCOL  *Debug;
+  UAGENT_DEBUG_PROTOCOL  *Debug;
   EFI_GUID                    VendorGuid;
   CHAR16                      *VariableName;
   CHAR16                      *RemoteMessage;
@@ -90,7 +90,7 @@ UefiMain (
   Started               = FALSE;
 
   Status = gBS->LocateProtocol (
-                  &mRunAndGetDebugProtocolGuid,
+                  &mUagentDebugProtocolGuid,
                   NULL,
                   (VOID **)&Debug
                   );

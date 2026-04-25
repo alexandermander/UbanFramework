@@ -1,15 +1,15 @@
-# RunAndGetPkg
+# UagentPkg
 
-`RunAndGetPkg` is a small EDK2 UEFI application intended to start after PXE boot, reuse the DHCP-provided IPv4 configuration, connect to a fixed server on TCP port `8080`, and provide a server-driven remote-control session.
+`UagentPkg` is a small EDK2 UEFI application intended to start after PXE boot, reuse the DHCP-provided IPv4 configuration, connect to a fixed server on TCP port `8080`, and provide a server-driven remote-control session.
 
 ## Current layout
 
-- `RunAndGet.c`: UEFI entry point only.
+- `Uagent.c`: UEFI entry point only.
 - `Shell.c`: interactive shell, command parsing, and dispatch.
 - `TcpClient.c`: PXE/TCP4 discovery, socket setup, transmit, receive, and cleanup.
-- `RunAndGet.h`: shared internal constants, types, and function declarations.
-- `RunAndGet.inf`: module definition.
-- `RunAndGetPkg.dsc`: package/platform build description.
+- `Uagent.h`: shared internal constants, types, and function declarations.
+- `Uagent.inf`: module definition.
+- `UagentPkg.dsc`: package/platform build description.
 
 ## Startup behavior
 
@@ -50,12 +50,12 @@
 From the EDK2 workspace root:
 
 ```sh
-build -p RunAndGetPkg/RunAndGetPkg.dsc -m RunAndGetPkg/RunAndGet.inf -a X64 -t GCC5
+build -p UagentPkg/UagentPkg.dsc -m UagentPkg/Uagent.inf -a X64 -t GCC5
 ```
 
 The generated EFI binary is written to:
 
-`Build/RunAndGetPkg/DEBUG_GCC5/X64/RunAndGet.efi`
+`Build/UagentPkg/DEBUG_GCC5/X64/Uagent.efi`
 
 ## Notes
 
@@ -75,6 +75,7 @@ The generated EFI binary is written to:
   - `8 = TcpEchoText`
 - The current `Shell.c` remote dispatcher actively handles `TcpSendText`, `TcpGetApps`, `TcpDisconnectSession`, `TcpEchoText`, `TcpPushEfiApp`, and `TcpExecuteEfiApp`.
 - Uploaded EFI binaries are kept in memory for the duration of the remote session and executed with `LoadImage()` and `StartImage()`.
+
 
 
 

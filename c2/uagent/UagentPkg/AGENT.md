@@ -1,8 +1,8 @@
-# RunAndGetPkg Agent Notes
+# UagentPkg Agent Notes
 
 ## What this project is
 
-`RunAndGetPkg` is a small EDK2 UEFI application that:
+`UagentPkg` is a small EDK2 UEFI application that:
 
 - starts after PXE boot
 - reuses the NIC's DHCP-provided IPv4 configuration
@@ -14,7 +14,7 @@ This is not a normal userspace socket program. It depends on UEFI PXE and TCP4 p
 
 ## Project structure
 
-- `RunAndGet.c`
+- `Uagent.c`
   - UEFI entry point
   - disables watchdog
   - starts the remote session first
@@ -33,18 +33,18 @@ This is not a normal userspace socket program. It depends on UEFI PXE and TCP4 p
   - sends and receives packets
   - cleans up the connection
 
-- `RunAndGet.h`
+- `Uagent.h`
   - shared constants, enums, structs, and function declarations
 
-- `RunAndGet.inf`
+- `Uagent.inf`
   - EDK2 module definition
 
-- `RunAndGetPkg.dsc`
+- `UagentPkg.dsc`
   - package/platform build description
 
 ## Boot and runtime flow
 
-1. `UefiMain()` in `RunAndGet.c` starts the app.
+1. `UefiMain()` in `Uagent.c` starts the app.
 2. The app immediately tries `RunRemoteSession()`.
 3. `InitSocketClient()` in `TcpClient.c` reuses PXE DHCP IPv4 settings and opens TCP4.
 4. If connection succeeds, the EFI app enters a persistent remote-command loop.
@@ -86,8 +86,8 @@ There are two main correct paths:
   - send it with `SendCommandPacket()`
 
 - Programmatic debug output from other EFI code
-  - use the installed `RUN_AND_GET_DEBUG_PROTOCOL`
-  - `RunAndGetSendDebugMessage()` in `RunAndGet.c` converts the message into a `TcpOutputText` packet
+  - use the installed `UAGENT_DEBUG_PROTOCOL`
+  - `UagentSendDebugMessage()` in `Uagent.c` converts the message into a `TcpOutputText` packet
 
 If an agent changes anything related to output, preserve this behavior.
 
@@ -143,3 +143,4 @@ When that happens, the app fails before any packets appear in Wireshark.
 - Treat `TcpOutputText` as the canonical way to send user-visible text to the remote server.
 - Be careful with changes in `TcpClient.c`; this code depends on firmware protocol availability, not only on network reachability.
 - If debugging connection failures, add stage-specific status prints around PXE discovery, TCP4 service binding, configure, and connect.
+

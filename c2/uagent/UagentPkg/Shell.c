@@ -1,4 +1,4 @@
-#include "RunAndGet.h"
+#include "Uagent.h"
 
 STATIC
 EFI_STATUS
@@ -229,7 +229,7 @@ ExecuteRemoteInstruction (
   }
 
   if (StrCmp (CommandLine, L"status") == 0) {
-    return DuplicateResponse (L"RunAndGet remote session active\n", Response);
+    return DuplicateResponse (L"Uagent remote session active\n", Response);
   }
 
   if (StrCmp (CommandLine, L"disconnect") == 0) {
@@ -287,22 +287,22 @@ RunRemoteSession (
     return Status;
   }
 
-  SetRunAndGetActiveClient (&Client);
-  Status = InstallRunAndGetDebugProtocol ();
+  SetUagentActiveClient (&Client);
+  Status = InstallUagentDebugProtocol ();
   if (EFI_ERROR (Status) && (Status != EFI_ALREADY_STARTED)) {
-    SetRunAndGetActiveClient (NULL);
+    SetUagentActiveClient (NULL);
     CloseSocketClient (&Client);
     return Status;
   }
 
   Outgoing.Type = TcpConnectSession;
-  Outgoing.Text = L"RunAndGet remote session ready";
+  Outgoing.Text = L"Uagent remote session ready";
   Outgoing.Payload = NULL;
   Outgoing.PayloadSize = 0;
   Status        = SendCommandPacket (&Client, &Outgoing);
   if (EFI_ERROR (Status)) {
-    UninstallRunAndGetDebugProtocol ();
-    SetRunAndGetActiveClient (NULL);
+    UninstallUagentDebugProtocol ();
+    SetUagentActiveClient (NULL);
     CloseSocketClient (&Client);
     return Status;
   }
@@ -365,8 +365,8 @@ RunRemoteSession (
     }
   }
 
-  UninstallRunAndGetDebugProtocol ();
-  SetRunAndGetActiveClient (NULL);
+  UninstallUagentDebugProtocol ();
+  SetUagentActiveClient (NULL);
   CloseSocketClient (&Client);
   ClearUploadedApp ();
   return Status;
@@ -446,7 +446,7 @@ RunShell (
   EFI_STATUS  Status;
   CHAR16      Command[COMMAND_BUF_SIZE];
 
-  Print (L"RunAndGet v%s\n", RUN_AND_GET_VERSION);
+  Print (L"Uagent v%s\n", UAGENT_VERSION);
   Print (L"Type 'help' for commands.\n");
 
   while (TRUE) {
