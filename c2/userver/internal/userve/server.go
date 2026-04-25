@@ -2,6 +2,8 @@ package userve
 
 import (
 	"encoding/binary"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -9,11 +11,13 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
-
-	"github.com/chzyer/readline"
+	"unicode"
+	"unicode/utf16"
 )
 
 const (
@@ -26,11 +30,11 @@ const (
 	cmdExecApp           = 7
 	cmdEchoSend          = 8
 
-	headerSize   = 3
-	defaultHost  = "0.0.0.0"
-	DefaultPort  = 8080
-	maxOutputLog = 200
-	shellPrompt  = "userve> "
+	headerSize        = 3
+	defaultHost       = "0.0.0.0"
+	DefaultPort       = 8080
+	maxOutputLog      = 200
+	defaultOutputTail = 20
 )
 
 type packet struct {
@@ -38,42 +42,48 @@ type packet struct {
 	payload []byte
 }
 
-//	func recvExactly(r io.Reader, size int) ([]byte, error) {
-//		buf := make([]byte, size)
-//		_, err := io.ReadFull(r, buf)
-//		if err != nil {
-//			return nil, err
-//		}
-//		return buf, nil
-//	}
-//
-//	func recvPacket(conn net.Conn) (*packet, error) {
-//		header, err := recvExactly(conn, headerSize)
-//		if err != nil {
-//			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-//				return nil, io.EOF
-//			}
-//			return nil, err
-//		}
-//		println("Received packet header")
-//
-//		payloadLength := int(binary.LittleEndian.Uint16(header[1:]))
-//		payload, err := recvExactly(conn, payloadLength)
-//		if err != nil {
-//			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-//				return nil, fmt.Errorf("connection closed during payload read, expected %d bytes", payloadLength)
-//			}
-//			return nil, err
-//		}
-//
-//		return &packet{
-//			command: header[0],
-//			payload: payload,
-//		}, nil
-//	}
+type controlRequest struct {
+	Command string   `json:"command"`
+	Args    []string `json:"args,omitempty"`
+}
+
+type controlResponse struct {
+	OK    bool     `json:"ok"`
+	Lines []string `json:"lines,omitempty"`
+}
+
+type session struct {
+	id             int
+	conn           net.Conn
+	addr           string
+	ready          bool
+	connectMessage string
+	outputs        []string
+	lastError      string
+}
+
+type sessionSnapshot struct {
+	ID             int
+	Addr           string
+	Ready          bool
+	ConnectMessage string
+	LastError      string
+	Active         bool
+}
+
+type sessionManager struct {
+	mu       sync.Mutex
+	sessions map[int]*session
+	nextID   int
+	activeID int
+}
+
+type controlService struct {
+	sessions *sessionManager
+	shutdown func()
+}
 
 func recvPacket(conn net.Conn) (*packet, error) {
-	// make a full read of the length-prefixed packet, handling partial reads
 	header := make([]byte, headerSize)
 	if _, err := io.ReadFull(conn, header); err != nil {
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
@@ -81,6 +91,7 @@ func recvPacket(conn net.Conn) (*packet, error) {
 		}
 		return nil, err
 	}
+
 	payloadLength := int(binary.LittleEndian.Uint16(header[1:]))
 	payload := make([]byte, payloadLength)
 	if _, err := io.ReadFull(conn, payload); err != nil {
@@ -94,7 +105,6 @@ func recvPacket(conn net.Conn) (*packet, error) {
 		command: header[0],
 		payload: payload,
 	}, nil
-
 }
 
 func buildPacket(command byte, payload []byte) []byte {
@@ -105,167 +115,244 @@ func buildPacket(command byte, payload []byte) []byte {
 	return data
 }
 
-type session struct {
-	conn           net.Conn
-	addr           string
-	ready          bool
-	connectMessage string
-	outputs        []string
-	lastError      string
-}
-
-type sessionManager struct {
-	mu      sync.Mutex
-	session *session
-}
-
 func (m *sessionManager) register(conn net.Conn) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.session = &session{
+	if m.sessions == nil {
+		m.sessions = make(map[int]*session)
+	}
+
+	m.nextID++
+	id := m.nextID
+	m.sessions[id] = &session{
+		id:      id,
 		conn:    conn,
 		addr:    conn.RemoteAddr().String(),
 		outputs: make([]string, 0, maxOutputLog),
 	}
+	if m.activeID == 0 {
+		m.activeID = id
+	}
 
-	return 1
+	return id
 }
 
-func (m *sessionManager) unregister() bool {
+func (m *sessionManager) unregister(id int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.session = nil
+
+	delete(m.sessions, id)
+	if m.activeID != id {
+		return
+	}
+
+	m.activeID = 0
+	for _, nextID := range m.sortedIDsLocked() {
+		m.activeID = nextID
+		break
+	}
+}
+
+func (m *sessionManager) markReady(id int, message string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	sess := m.sessions[id]
+	if sess == nil {
+		return
+	}
+
+	sess.ready = true
+	sess.connectMessage = message
+}
+
+func (m *sessionManager) addOutput(id int, text string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	sess := m.sessions[id]
+	if sess == nil {
+		return
+	}
+
+	if len(sess.outputs) == maxOutputLog {
+		copy(sess.outputs, sess.outputs[1:])
+		sess.outputs = sess.outputs[:maxOutputLog-1]
+	}
+	sess.outputs = append(sess.outputs, text)
+}
+
+func (m *sessionManager) setError(id int, text string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	sess := m.sessions[id]
+	if sess == nil {
+		return
+	}
+
+	sess.lastError = text
+	if len(sess.outputs) == maxOutputLog {
+		copy(sess.outputs, sess.outputs[1:])
+		sess.outputs = sess.outputs[:maxOutputLog-1]
+	}
+	sess.outputs = append(sess.outputs, text)
+}
+
+func (m *sessionManager) setActive(id int) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.sessions[id] == nil {
+		return false
+	}
+	m.activeID = id
 	return true
 }
 
-func (m *sessionManager) isConnected() bool {
+func (m *sessionManager) activeSnapshot() (sessionSnapshot, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.session != nil
+
+	sess := m.sessions[m.activeID]
+	if sess == nil {
+		return sessionSnapshot{}, false
+	}
+	return snapshotFromSession(sess, true), true
 }
 
-func (m *sessionManager) markReady(message string) {
+func (m *sessionManager) snapshots() []sessionSnapshot {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.session == nil {
-		return
+
+	ids := m.sortedIDsLocked()
+	snaps := make([]sessionSnapshot, 0, len(ids))
+	for _, id := range ids {
+		snaps = append(snaps, snapshotFromSession(m.sessions[id], id == m.activeID))
 	}
-	m.session.ready = true
-	m.session.connectMessage = message
+	return snaps
 }
 
-func (m *sessionManager) addOutput(text string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.session == nil {
-		return
-	}
-	if len(m.session.outputs) == maxOutputLog {
-		copy(m.session.outputs, m.session.outputs[1:])
-		m.session.outputs = m.session.outputs[:maxOutputLog-1]
-	}
-	m.session.outputs = append(m.session.outputs, text)
-}
-
-func (m *sessionManager) setError(text string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.session == nil {
-		return
-	}
-	m.session.lastError = text
-	if len(m.session.outputs) == maxOutputLog {
-		copy(m.session.outputs, m.session.outputs[1:])
-		m.session.outputs = m.session.outputs[:maxOutputLog-1]
-	}
-	m.session.outputs = append(m.session.outputs, text)
-}
-
-func (m *sessionManager) getStatus() map[string]any {
+func (m *sessionManager) outputs(limit int) ([]string, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if m.session == nil {
-		return map[string]any{"connected": false}
+	sess := m.sessions[m.activeID]
+	if sess == nil {
+		return nil, false
 	}
 
-	return map[string]any{
-		"connected":       true,
-		"address":         m.session.addr,
-		"ready":           m.session.ready,
-		"connect_message": m.session.connectMessage,
-	}
-}
-
-func (m *sessionManager) getOutputs(limit int) (bool, any) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if m.session == nil {
-		return false, "ERR no system connected"
-	}
-
-	outputs := m.session.outputs
+	outputs := sess.outputs
 	if limit > 0 && limit < len(outputs) {
 		outputs = outputs[len(outputs)-limit:]
 	}
 
-	result := make([]string, len(outputs))
-	copy(result, outputs)
-	return true, map[string]any{"outputs": result}
+	cloned := make([]string, len(outputs))
+	copy(cloned, outputs)
+	return cloned, true
 }
 
 func (m *sessionManager) sendPacket(command byte, payload []byte) (bool, string) {
 	m.mu.Lock()
-	if m.session == nil {
-		m.mu.Unlock()
-		return false, "ERR no system connected"
-	}
-	conn := m.session.conn
+	sess := m.sessions[m.activeID]
 	m.mu.Unlock()
 
-	if _, err := conn.Write(buildPacket(command, payload)); err != nil {
-		m.unregister()
-		return false, fmt.Sprintf("ERR connection lost: %v", err)
+	if sess == nil {
+		return false, "ERR no active connection"
 	}
 
-	return true, fmt.Sprintf("OK sent command %d", command)
+	if _, err := sess.conn.Write(buildPacket(command, payload)); err != nil {
+		m.unregister(sess.id)
+		return false, fmt.Sprintf("ERR connection %d lost: %v", sess.id, err)
+	}
+
+	return true, fmt.Sprintf("OK sent command %d to connection %d", command, sess.id)
 }
 
-type controlService struct {
-	sessions  *sessionManager
-	console   *readline.Instance
-	consoleMu sync.Mutex
+func (m *sessionManager) closeAll() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for _, sess := range m.sessions {
+		_ = sess.conn.Close()
+	}
 }
 
-func (c *controlService) status() map[string]any {
-	return c.sessions.getStatus()
+func (m *sessionManager) sortedIDsLocked() []int {
+	ids := make([]int, 0, len(m.sessions))
+	for id := range m.sessions {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	return ids
 }
 
-func (c *controlService) attachConsole(rl *readline.Instance) {
-	c.consoleMu.Lock()
-	defer c.consoleMu.Unlock()
-	c.console = rl
-}
-
-func (c *controlService) detachConsole() {
-	c.consoleMu.Lock()
-	defer c.consoleMu.Unlock()
-	c.console = nil
+func snapshotFromSession(sess *session, active bool) sessionSnapshot {
+	return sessionSnapshot{
+		ID:             sess.id,
+		Addr:           sess.addr,
+		Ready:          sess.ready,
+		ConnectMessage: sess.connectMessage,
+		LastError:      sess.lastError,
+		Active:         active,
+	}
 }
 
 func (c *controlService) printAsync(format string, args ...any) {
-	c.consoleMu.Lock()
-	defer c.consoleMu.Unlock()
+	fmt.Printf(format, args...)
+}
 
-	if c.console != nil {
-		fmt.Fprintf(c.console.Stdout(), format, args...)
-		c.console.Refresh()
-		return
+func (c *controlService) statusLines() []string {
+	snap, ok := c.sessions.activeSnapshot()
+	if !ok {
+		return []string{"No active connection."}
 	}
 
-	fmt.Printf(format, args...)
+	lines := []string{
+		fmt.Sprintf("Active connection: #%d", snap.ID),
+		fmt.Sprintf("Address: %s", snap.Addr),
+		fmt.Sprintf("Ready: %t", snap.Ready),
+	}
+	if snap.ConnectMessage != "" {
+		lines = append(lines, fmt.Sprintf("Connect message: %s", snap.ConnectMessage))
+	}
+	if snap.LastError != "" {
+		lines = append(lines, fmt.Sprintf("Last error: %s", snap.LastError))
+	}
+	return lines
+}
+
+func (c *controlService) listLines() []string {
+	snaps := c.sessions.snapshots()
+	if len(snaps) == 0 {
+		return []string{"No active connections."}
+	}
+
+	lines := make([]string, 0, len(snaps))
+	for _, snap := range snaps {
+		marker := " "
+		if snap.Active {
+			marker = "*"
+		}
+		line := fmt.Sprintf("%s #%d %s ready=%t", marker, snap.ID, snap.Addr, snap.Ready)
+		if snap.ConnectMessage != "" {
+			line += fmt.Sprintf(" msg=%q", snap.ConnectMessage)
+		}
+		lines = append(lines, line)
+	}
+	return lines
+}
+
+func (c *controlService) outputsLines(limit int) []string {
+	outputs, ok := c.sessions.outputs(limit)
+	if !ok {
+		return []string{"ERR no active connection"}
+	}
+	if len(outputs) == 0 {
+		return []string{"No buffered output."}
+	}
+	return outputs
 }
 
 func (c *controlService) sendCommand(text string) (bool, string) {
@@ -287,8 +374,158 @@ func (c *controlService) disconnect() (bool, string) {
 	return c.sessions.sendPacket(cmdDisconnectSession, nil)
 }
 
-func (c *controlService) outputs(limit int) (bool, any) {
-	return c.sessions.getOutputs(limit)
+func (c *controlService) pushFile(path string) (bool, string) {
+	filename := filepath.Base(path)
+	if filename == "" {
+		return false, "ERR missing filename"
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false, fmt.Sprintf("ERR failed to read %s: %v", path, err)
+	}
+	if !isASCII(filename) {
+		return false, "ERR filename must be ASCII"
+	}
+	if len(filename) > 255 {
+		return false, "ERR filename too long"
+	}
+
+	payload := make([]byte, 1+len(filename)+len(data))
+	payload[0] = byte(len(filename))
+	copy(payload[1:], []byte(filename))
+	copy(payload[1+len(filename):], data)
+
+	ok, response := c.sessions.sendPacket(cmdPushFile, payload)
+	if !ok {
+		return false, response
+	}
+	return true, fmt.Sprintf("Pushed %s to active EFI system.", filename)
+}
+
+func (c *controlService) runApp() (bool, string) {
+	return c.sessions.sendPacket(cmdExecApp, nil)
+}
+
+func (c *controlService) handleControlRequest(req controlRequest) controlResponse {
+	command := strings.TrimSpace(req.Command)
+	switch command {
+	case "list":
+		return controlResponse{OK: true, Lines: c.listLines()}
+	case "status":
+		return controlResponse{OK: true, Lines: c.statusLines()}
+	case "use":
+		if len(req.Args) != 1 {
+			return controlResponse{OK: false, Lines: []string{"ERR use requires exactly one connection id"}}
+		}
+		id, err := strconv.Atoi(req.Args[0])
+		if err != nil {
+			return controlResponse{OK: false, Lines: []string{fmt.Sprintf("ERR invalid connection id: %s", req.Args[0])}}
+		}
+		if !c.sessions.setActive(id) {
+			return controlResponse{OK: false, Lines: []string{fmt.Sprintf("ERR unknown connection id %d", id)}}
+		}
+		return controlResponse{OK: true, Lines: []string{fmt.Sprintf("Active connection set to #%d", id)}}
+	case "outputs":
+		limit := defaultOutputTail
+		if len(req.Args) > 1 {
+			return controlResponse{OK: false, Lines: []string{"ERR outputs accepts at most one limit"}}
+		}
+		if len(req.Args) == 1 {
+			value, err := strconv.Atoi(req.Args[0])
+			if err != nil || value < 0 {
+				return controlResponse{OK: false, Lines: []string{fmt.Sprintf("ERR invalid output limit: %s", req.Args[0])}}
+			}
+			limit = value
+		}
+		return controlResponse{OK: true, Lines: c.outputsLines(limit)}
+	case "apps":
+		return responseFromResult(c.getApps())
+	case "disconnect":
+		return responseFromResult(c.disconnect())
+	case "push":
+		if len(req.Args) != 1 {
+			return controlResponse{OK: false, Lines: []string{"ERR push requires a file path"}}
+		}
+		return responseFromResult(c.pushFile(req.Args[0]))
+	case "run":
+		return responseFromResult(c.runApp())
+	case "echo", "raw":
+		return responseFromResult(c.sendCommand(strings.Join(req.Args, " ")))
+	case "stop":
+		if c.shutdown != nil {
+			c.shutdown()
+		}
+		return controlResponse{OK: true, Lines: []string{"Service shutting down."}}
+	default:
+		return controlResponse{OK: false, Lines: []string{fmt.Sprintf("ERR unknown control command %q", command)}}
+	}
+}
+
+func responseFromResult(ok bool, line string) controlResponse {
+	return controlResponse{OK: ok, Lines: []string{line}}
+}
+
+func decodeRemoteTextPayload(payload []byte) string {
+	if len(payload) == 0 {
+		return ""
+	}
+
+	if text, ok := decodeUTF16Payload(payload); ok {
+		return text
+	}
+
+	if isASCIIBytes(payload) {
+		return string(payload)
+	}
+
+	return "hex:" + strings.ToUpper(hex.EncodeToString(payload))
+}
+
+func decodeUTF16Payload(payload []byte) (string, bool) {
+	if len(payload)%2 != 0 {
+		return "", false
+	}
+
+	words := make([]uint16, len(payload)/2)
+	for i := 0; i < len(words); i++ {
+		words[i] = binary.LittleEndian.Uint16(payload[i*2:])
+	}
+
+	text := string(utf16.Decode(words))
+	if !looksReadableText(text) {
+		return "", false
+	}
+
+	return text, true
+}
+
+func isASCIIBytes(payload []byte) bool {
+	for _, b := range payload {
+		if b > 127 {
+			return false
+		}
+	}
+	return true
+}
+
+func looksReadableText(text string) bool {
+	if text == "" {
+		return true
+	}
+
+	for _, r := range text {
+		switch {
+		case r == '\n', r == '\r', r == '\t':
+			continue
+		case unicode.IsPrint(r):
+			continue
+		default:
+			return false
+		}
+	}
+
+	return true
 }
 
 func isASCII(text string) bool {
@@ -303,214 +540,133 @@ func isASCII(text string) bool {
 func handleConnection(conn net.Conn, service *controlService) {
 	defer conn.Close()
 
-	service.sessions.register(conn)
+	id := service.sessions.register(conn)
 	host, _, err := net.SplitHostPort(conn.RemoteAddr().String())
 	if err != nil {
 		host = conn.RemoteAddr().String()
 	}
-	service.printAsync("\n[!] System connected from %s\n", host)
+	service.printAsync("[!] Connection #%d connected from %s\n", id, host)
 
 	defer func() {
-		service.sessions.unregister()
-		service.printAsync("\n[!] System disconnected.\n")
+		service.sessions.unregister(id)
+		service.printAsync("[!] Connection #%d disconnected.\n", id)
 	}()
 
 	for {
 		pkt, err := recvPacket(conn)
 		if err != nil {
 			if !errors.Is(err, io.EOF) {
-				service.sessions.setError("ERR " + err.Error())
+				service.sessions.setError(id, "ERR "+err.Error())
 			}
 			return
 		}
+
 		switch pkt.command {
 		case cmdConnectSession:
-			msg := string(pkt.payload)
-			service.sessions.markReady(msg)
-			service.printAsync("[+] Session ready: %s\n", msg)
+			msg := decodeRemoteTextPayload(pkt.payload)
+			service.sessions.markReady(id, msg)
+			service.printAsync("[+] Connection #%d ready: %s\n", id, msg)
 		case cmdOutputText:
-			text := string(pkt.payload)
-			service.sessions.addOutput(text)
-			service.printAsync("[OUTPUT] %s\n", text)
+			text := decodeRemoteTextPayload(pkt.payload)
+			service.sessions.addOutput(id, text)
+			service.printAsync("[OUTPUT #%d] %s\n", id, text)
 		case cmdDisconnectSession:
 			return
 		}
 	}
 }
 
-func printShellHelp() {
-	fmt.Println("Shell ready for EFI control.")
-	fmt.Println("Type a raw command to send it directly to the connected EFI client.")
-	fmt.Println("Built-in commands:")
-	fmt.Println("  help         Show this help text")
-	fmt.Println("  status       Show session status and remote address")
-	fmt.Println("  apps         Ask the client for its app list")
-	fmt.Println("  disconnect   Tell the client to disconnect")
-	fmt.Println("  push <file>  Upload a local file to the client")
-	fmt.Println("  run          Ask the client to execute the selected app")
-	fmt.Println("  echo <text>  Send ASCII text to the connected client")
-	fmt.Println("  exit | quit  Stop the local server")
-	fmt.Println("Tab completion is available for the built-in commands.")
-}
-
-func newShellCompleter() *readline.PrefixCompleter {
-	return readline.NewPrefixCompleter(
-		readline.PcItem("help"),
-		readline.PcItem("?"),
-		readline.PcItem("status"),
-		readline.PcItem("apps"),
-		readline.PcItem("disconnect"),
-		readline.PcItem("push"),
-		readline.PcItem("run"),
-		readline.PcItem("echo"),
-		readline.PcItem("exit"),
-		readline.PcItem("quit"),
-	)
-}
-
-func shellHistoryPath() string {
+func defaultControlSocketDir() string {
 	cacheDir, err := os.UserCacheDir()
 	if err == nil && cacheDir != "" {
-		return filepath.Join(cacheDir, "userve", "shell.history")
+		return filepath.Join(cacheDir, "userve")
 	}
-	return filepath.Join(os.TempDir(), "userve-shell.history")
+	return filepath.Join(os.TempDir(), "userve")
 }
 
-func operatorConsoleLoop(service *controlService, stop chan struct{}, stopOnce *sync.Once) {
-	historyPath := shellHistoryPath()
-	_ = os.MkdirAll(filepath.Dir(historyPath), 0o755)
+func DefaultControlSocketPath() string {
+	return filepath.Join(defaultControlSocketDir(), "control.sock")
+}
 
-	rl, err := readline.NewEx(&readline.Config{
-		Prompt:          shellPrompt,
-		HistoryFile:     historyPath,
-		InterruptPrompt: "^C",
-		EOFPrompt:       "exit",
-		AutoComplete:    newShellCompleter(),
-	})
+func listenControlSocket(path string) (net.Listener, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, fmt.Errorf("failed to create control socket directory: %w", err)
+	}
+
+	if info, err := os.Stat(path); err == nil {
+		if info.IsDir() {
+			return nil, fmt.Errorf("control socket path is a directory: %s", path)
+		}
+		conn, dialErr := net.Dial("unix", path)
+		if dialErr == nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("control socket already in use: %s", path)
+		}
+		if removeErr := os.Remove(path); removeErr != nil {
+			return nil, fmt.Errorf("failed to remove stale control socket: %w", removeErr)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("failed to inspect control socket path: %w", err)
+	}
+
+	listener, err := net.Listen("unix", path)
 	if err != nil {
-		fmt.Printf("failed to initialize interactive shell: %v\n", err)
+		return nil, err
+	}
+	if chmodErr := os.Chmod(path, 0o600); chmodErr != nil {
+		_ = listener.Close()
+		_ = os.Remove(path)
+		return nil, fmt.Errorf("failed to secure control socket: %w", chmodErr)
+	}
+	return listener, nil
+}
+
+func handleControlConn(conn net.Conn, service *controlService) {
+	defer conn.Close()
+
+	var req controlRequest
+	if err := json.NewDecoder(conn).Decode(&req); err != nil {
+		_ = json.NewEncoder(conn).Encode(controlResponse{
+			OK:    false,
+			Lines: []string{fmt.Sprintf("ERR invalid control request: %v", err)},
+		})
 		return
 	}
-	defer rl.Close()
-	service.attachConsole(rl)
-	defer service.detachConsole()
 
-	printShellHelp()
-	for {
-		select {
-		case <-stop:
-			return
-		default:
-		}
-
-		line, err := rl.Readline()
-		if errors.Is(err, readline.ErrInterrupt) {
-			if strings.TrimSpace(line) == "" {
-				fmt.Println()
-				continue
-			}
-		}
-		if errors.Is(err, io.EOF) {
-			stopOnce.Do(func() { close(stop) })
-			return
-		}
-		if err != nil {
-			fmt.Printf("shell error: %v\n", err)
-			continue
-		}
-
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-
-		switch {
-		case line == "help" || line == "?":
-			printShellHelp()
-		case line == "exit" || line == "quit" || line == "q":
-			fmt.Println("Shutting down...")
-			stopOnce.Do(func() { close(stop) })
-			return
-		case line == "status":
-			fmt.Println(service.status())
-		case line == "apps":
-			_, response := service.getApps()
-			fmt.Println(response)
-		case line == "disconnect":
-			_, response := service.disconnect()
-			fmt.Println(response)
-		case strings.HasPrefix(line, "push "):
-			filename := strings.TrimSpace(strings.TrimPrefix(line, "push "))
-			if filename == "" {
-				fmt.Println("Error: missing filename")
-				continue
-			}
-			data, err := os.ReadFile(filename)
-			if err != nil {
-				fmt.Printf("Error: %v\n", err)
-				continue
-			}
-			if !isASCII(filename) {
-				fmt.Println("Error: filename must be ASCII")
-				continue
-			}
-			if len(filename) > 255 {
-				fmt.Println("Error: filename too long")
-				continue
-			}
-
-			payload := make([]byte, 1+len(filename)+len(data))
-			payload[0] = byte(len(filename))
-			copy(payload[1:], []byte(filename))
-			copy(payload[1+len(filename):], data)
-
-			ok, response := service.sessions.sendPacket(cmdPushFile, payload)
-			if !ok {
-				fmt.Println(response)
-				continue
-			}
-			fmt.Printf("Pushed %s to EFI system.\n", filename)
-		case line == "run":
-			if !service.sessions.isConnected() {
-				fmt.Println("ERR: No system connected.")
-				continue
-			}
-			fmt.Println("remote execution mode")
-			ok, response := service.sessions.sendPacket(cmdExecApp, nil)
-			if !ok {
-				fmt.Println(response)
-			}
-		case strings.HasPrefix(line, "echo "):
-			text := strings.TrimSpace(strings.TrimPrefix(line, "echo "))
-			if text == "" {
-				fmt.Println("ERR empty command")
-				continue
-			}
-			ok, response := service.sendCommand(text)
-			if !ok {
-				fmt.Println(response)
-			}
-		default:
-			ok, response := service.sendCommand(line)
-			if !ok {
-				fmt.Println(response)
-			}
-		}
-	}
+	resp := service.handleControlRequest(req)
+	_ = json.NewEncoder(conn).Encode(resp)
 }
 
-func Run(port int) error {
-	sessionManager := &sessionManager{}
-	controlService := &controlService{sessions: sessionManager}
-
-	listener, err := net.Listen("tcp", fmt.Sprintf("%s:%d", defaultHost, port))
-	if err != nil {
-		return fmt.Errorf("failed to start TCP server: %w", err)
+func RunService(port int, controlSocket string) error {
+	sessionManager := &sessionManager{
+		sessions: make(map[int]*session),
 	}
-	defer listener.Close()
 
 	stop := make(chan struct{})
 	var stopOnce sync.Once
+	shutdown := func() {
+		stopOnce.Do(func() { close(stop) })
+	}
+
+	service := &controlService{
+		sessions: sessionManager,
+		shutdown: shutdown,
+	}
+
+	tcpListener, err := net.Listen("tcp", fmt.Sprintf("%s:%d", defaultHost, port))
+	if err != nil {
+		return fmt.Errorf("failed to start TCP server: %w", err)
+	}
+	defer tcpListener.Close()
+
+	controlListener, err := listenControlSocket(controlSocket)
+	if err != nil {
+		return fmt.Errorf("failed to start control socket: %w", err)
+	}
+	defer func() {
+		_ = controlListener.Close()
+		_ = os.Remove(controlSocket)
+	}()
 
 	signalChan := make(chan os.Signal, 1)
 	signal.Notify(signalChan, syscall.SIGINT, syscall.SIGTERM)
@@ -519,16 +675,17 @@ func Run(port int) error {
 	go func() {
 		select {
 		case <-signalChan:
-			stopOnce.Do(func() { close(stop) })
-			_ = listener.Close()
+			shutdown()
 		case <-stop:
-			_ = listener.Close()
 		}
+		_ = tcpListener.Close()
+		_ = controlListener.Close()
+		sessionManager.closeAll()
 	}()
 
 	go func() {
 		for {
-			conn, err := listener.Accept()
+			conn, err := tcpListener.Accept()
 			if err != nil {
 				select {
 				case <-stop:
@@ -538,11 +695,29 @@ func Run(port int) error {
 					continue
 				}
 			}
-			go handleConnection(conn, controlService)
+			go handleConnection(conn, service)
 		}
 	}()
 
-	fmt.Printf("Listening for connection on port %d...\n", port)
-	operatorConsoleLoop(controlService, stop, &stopOnce)
+	go func() {
+		for {
+			conn, err := controlListener.Accept()
+			if err != nil {
+				select {
+				case <-stop:
+					return
+				default:
+					fmt.Fprintf(os.Stderr, "control accept error: %v\n", err)
+					continue
+				}
+			}
+			go handleControlConn(conn, service)
+		}
+	}()
+
+	fmt.Printf("Listening for UEFI connections on port %d...\n", port)
+	fmt.Printf("Listening for local control on %s\n", controlSocket)
+
+	<-stop
 	return nil
 }
