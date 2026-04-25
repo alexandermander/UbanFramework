@@ -7,46 +7,41 @@ import (
 	"io"
 	"net"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strings"
-	"syscall"
-	"time"
 
 	"github.com/chzyer/readline"
+
+	"userve/internal/control"
 )
 
 const shellPrompt = "userve> "
 
-func sendControlRequest(controlSocket string, req controlRequest) (controlResponse, error) {
+func sendControlRequest(controlSocket string, req control.ControlRequest) (control.ControlResponse, error) {
 	conn, err := net.Dial("unix", controlSocket)
 	if err != nil {
-		return controlResponse{}, fmt.Errorf("failed to connect to local control socket %s: %w", controlSocket, err)
+		return control.ControlResponse{}, fmt.Errorf("failed to connect to local control socket %s: %w", controlSocket, err)
 	}
 	defer conn.Close()
 
 	if err := json.NewEncoder(conn).Encode(req); err != nil {
-		return controlResponse{}, fmt.Errorf("failed to send control request: %w", err)
+		return control.ControlResponse{}, fmt.Errorf("failed to send control request: %w", err)
 	}
 
-	var resp controlResponse
+	var resp control.ControlResponse
 	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
-		return controlResponse{}, fmt.Errorf("failed to read control response: %w", err)
+		return control.ControlResponse{}, fmt.Errorf("failed to read control response: %w", err)
 	}
 	return resp, nil
 }
 
-func printControlResponse(resp controlResponse) {
+func printControlResponse(resp control.ControlResponse) {
 	for _, line := range resp.Lines {
 		fmt.Println(line)
 	}
 }
 
 func RunControlCommand(controlSocket, command string, args []string) error {
-	if command == "run" {
-		return runAndFollow(controlSocket)
-	}
-
 	req, err := requestFromCommand(command, args)
 	if err != nil {
 		return err
@@ -108,11 +103,6 @@ func RunShell(controlSocket string) error {
 			continue
 		case line == "exit" || line == "quit" || line == "q":
 			return nil
-		case line == "run":
-			if err := runAndFollow(controlSocket); err != nil {
-				fmt.Println(err)
-			}
-			continue
 		}
 
 		req := requestFromLine(line)
@@ -125,120 +115,46 @@ func RunShell(controlSocket string) error {
 	}
 }
 
-func requestFromCommand(command string, args []string) (controlRequest, error) {
+func requestFromCommand(command string, args []string) (control.ControlRequest, error) {
 	switch command {
 	case "list", "status", "apps", "disconnect", "run", "stop":
-		return controlRequest{Command: command, Args: args}, nil
+		return control.ControlRequest{Command: command, Args: args}, nil
 	case "use", "push":
 		if len(args) != 1 {
-			return controlRequest{}, fmt.Errorf("%s requires exactly one argument", command)
+			return control.ControlRequest{}, fmt.Errorf("%s requires exactly one argument", command)
 		}
-		return controlRequest{Command: command, Args: args}, nil
+		return control.ControlRequest{Command: command, Args: args}, nil
 	case "outputs":
 		if len(args) > 1 {
-			return controlRequest{}, fmt.Errorf("outputs accepts at most one argument")
+			return control.ControlRequest{}, fmt.Errorf("outputs accepts at most one argument")
 		}
-		return controlRequest{Command: command, Args: args}, nil
+		return control.ControlRequest{Command: command, Args: args}, nil
 	case "echo", "raw":
 		if len(args) == 0 {
-			return controlRequest{}, fmt.Errorf("%s requires text to send", command)
+			return control.ControlRequest{}, fmt.Errorf("%s requires text to send", command)
 		}
-		return controlRequest{Command: command, Args: []string{strings.Join(args, " ")}}, nil
+		return control.ControlRequest{Command: command, Args: []string{strings.Join(args, " ")}}, nil
 	default:
-		return controlRequest{}, fmt.Errorf("unknown command %q", command)
+		return control.ControlRequest{}, fmt.Errorf("unknown command %q", command)
 	}
 }
 
-func runAndFollow(controlSocket string) error {
-	baseline, err := fetchAllOutputs(controlSocket)
-	if err != nil {
-		baseline = nil
-	}
-
-	resp, err := sendControlRequest(controlSocket, controlRequest{Command: "run"})
-	if err != nil {
-		return err
-	}
-
-	printControlResponse(resp)
-	if !resp.OK {
-		return fmt.Errorf("control command failed")
-	}
-
-	fmt.Println("Listening for remote output. Press Ctrl+C to stop.")
-	return followOutputs(controlSocket, len(baseline))
-}
-
-func fetchAllOutputs(controlSocket string) ([]string, error) {
-	resp, err := sendControlRequest(controlSocket, controlRequest{
-		Command: "outputs",
-		Args:    []string{"0"},
-	})
-	if err != nil {
-		return nil, err
-	}
-	if !resp.OK {
-		return nil, fmt.Errorf(strings.Join(resp.Lines, "\n"))
-	}
-	if len(resp.Lines) == 1 && resp.Lines[0] == "No buffered output." {
-		return []string{}, nil
-	}
-	return resp.Lines, nil
-}
-
-func followOutputs(controlSocket string, seen int) error {
-	ticker := time.NewTicker(300 * time.Millisecond)
-	defer ticker.Stop()
-
-	signalChan := make(chan os.Signal, 1)
-	signal.Notify(signalChan, os.Interrupt, syscall.SIGTERM)
-	defer signal.Stop(signalChan)
-
-	for {
-		select {
-		case <-signalChan:
-			fmt.Println()
-			return nil
-		case <-ticker.C:
-			lines, err := fetchAllOutputs(controlSocket)
-			if err != nil {
-				return err
-			}
-
-			if len(lines) < seen {
-				seen = 0
-			}
-			if len(lines) == seen {
-				continue
-			}
-
-			for _, line := range lines[seen:] {
-				fmt.Println(line)
-				if strings.Contains(line, "Success") {
-					return nil
-				}
-			}
-			seen = len(lines)
-		}
-	}
-}
-
-func requestFromLine(line string) controlRequest {
+func requestFromLine(line string) control.ControlRequest {
 	switch {
 	case line == "list", line == "status", line == "apps", line == "disconnect", line == "run", line == "stop":
-		return controlRequest{Command: line}
+		return control.ControlRequest{Command: line}
 	case strings.HasPrefix(line, "use "):
-		return controlRequest{Command: "use", Args: []string{strings.TrimSpace(strings.TrimPrefix(line, "use "))}}
+		return control.ControlRequest{Command: "use", Args: []string{strings.TrimSpace(strings.TrimPrefix(line, "use "))}}
 	case strings.HasPrefix(line, "push "):
-		return controlRequest{Command: "push", Args: []string{strings.TrimSpace(strings.TrimPrefix(line, "push "))}}
+		return control.ControlRequest{Command: "push", Args: []string{strings.TrimSpace(strings.TrimPrefix(line, "push "))}}
 	case strings.HasPrefix(line, "outputs "):
-		return controlRequest{Command: "outputs", Args: []string{strings.TrimSpace(strings.TrimPrefix(line, "outputs "))}}
+		return control.ControlRequest{Command: "outputs", Args: []string{strings.TrimSpace(strings.TrimPrefix(line, "outputs "))}}
 	case line == "outputs":
-		return controlRequest{Command: "outputs"}
+		return control.ControlRequest{Command: "outputs"}
 	case strings.HasPrefix(line, "echo "):
-		return controlRequest{Command: "echo", Args: []string{strings.TrimSpace(strings.TrimPrefix(line, "echo "))}}
+		return control.ControlRequest{Command: "echo", Args: []string{strings.TrimSpace(strings.TrimPrefix(line, "echo "))}}
 	default:
-		return controlRequest{Command: "raw", Args: []string{line}}
+		return control.ControlRequest{Command: "raw", Args: []string{line}}
 	}
 }
 
