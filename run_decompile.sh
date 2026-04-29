@@ -7,7 +7,7 @@ cleanup() {
 
 trap cleanup SIGINT
 
-OUTPATH="out_decomplied_files"
+OUTPATH="out_decompiled_files"
 
 MY_SCRIPTS=$(readlink -f "$(dirname "$0")")
 PROJECT_DIR="$MY_SCRIPTS/ghidra_projects"
