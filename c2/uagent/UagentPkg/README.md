@@ -20,7 +20,7 @@
 
 ## Go server
 
-- The current server project is the Go implementation at `/home/alexa/Documents/SanderStuff/aau/cyber2/userve/uservego`.
+- The current server project is the Go implementation at [https://github.com/alexandermander/UbanFramework/tree/main/c2/userver](https://github.com/alexandermander/UbanFramework/tree/main/c2/userver).
 - The Go shell prompt is `userve>`.
 - `userve> echo test` does not send the literal text `echo test` as a `TcpSendText` packet.
 - Instead, the Go server sends `TcpEchoText` with payload `test`.
