@@ -73,9 +73,11 @@ def run_one(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Parallel Ghidra headless decompile.")
-    parser.add_argument("--jobs", type=int, default=max(1, os.cpu_count() // 2))
-    parser.add_argument("--outdir", default="out_decomplied_files")
+    parser = argparse.ArgumentParser(
+        description="Parallel Ghidra headless decompile.")
+    parser.add_argument("--jobs", type=int,
+                        default=max(1, os.cpu_count() // 2))
+    parser.add_argument("--outdir", default="out_decompiled_files")
     parser.add_argument("--project-root", default="ghidra_projects")
     parser.add_argument("--input-dir", default="getallbin")
     parser.add_argument(

@@ -63,7 +63,7 @@ The output directory must be synchronized with your host machine.
 
 ```bash
 docker run --rm -it \
--v $(pwd)/out_decomplied_files:/app/out_decomplied_files \
+-v $(pwd)/work/out_decompiled_files:/app/out_decompiled_files \
 ubanframework
 ```
 
@@ -72,7 +72,7 @@ This mounts the container output directory to your local project directory.
 All generated files will appear in:
 
 ```
-./out_decomplied_files
+./work/out_decompiled_files
 ```
 
 ---
@@ -80,7 +80,7 @@ All generated files will appear in:
 ## Windows (PowerShell)
 
 ```powershell
-docker run --rm -it -v ${PWD}/out_decomplied_files:/app/out_decomplied_files ubanframework
+docker run --rm -it -v ${PWD}/work/out_decompiled_files:/app/out_decompiled_files ubanframework
 ```
 
 ---
@@ -90,13 +90,13 @@ docker run --rm -it -v ${PWD}/out_decomplied_files:/app/out_decomplied_files uba
 All generated files will be written to:
 
 ```
-out_decomplied_files/
+work/out_decompiled_files/
 ```
 
 For each detected PE module the framework creates:
 
 ```
-out_decomplied_files/
+out_decompiled_files/
  ├── ModuleName/
  │   ├── main.efi
  │   └── decompiled_main.c
